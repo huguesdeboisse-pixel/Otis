@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcript</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<meta name="theme-color" content="#1d4ed8">
+<style>
+:root{--bg:#f8fafc;--fg:#0f172a;--card:#fff;--mut:#64748b;--ac:#1d4ed8;--bd:#e2e8f0}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--fg:#f1f5f9;--card:#1e293b;--mut:#94a3b8;--ac:#3b82f6;--bd:#334155}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg);max-width:640px;margin-inline:auto}
+h1{font-size:1.3rem;margin:0 0 12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+button,select,label.btn{font:inherit;padding:12px 14px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg)}
+button.main,label.btn{background:var(--ac);color:#fff;border-color:var(--ac);flex:1;text-align:center;cursor:pointer}
+button.rec{background:#dc2626;border-color:#dc2626}
+select{width:100%}
+#st{color:var(--mut);font-size:.9rem;min-height:1.4em;margin:6px 0}
+#out{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;min-height:220px;white-space:pre-wrap;width:100%;font:inherit;color:var(--fg)}
+</style>
+</head>
+<body>
+<h1>Transcript</h1>
+<div class="row"><select id="model">
+<option value="onnx-community/whisper-tiny">Tiny – rapide, moins précis (~40 Mo)</option>
+<option value="onnx-community/whisper-base" selected>Base – équilibré (~80 Mo)</option>
+<option value="onnx-community/whisper-small">Small – précis, lent (~250 Mo)</option>
+</select></div>
+<div class="row">
+<button id="live" class="main">🎙️ Live</button>
+<label class="btn">📁 Replay<input id="file" type="file" accept="audio/*,video/*" hidden></label>
+</div>
+<div id="st">Prêt. Le modèle se télécharge au premier usage (réseau requis une seule fois).</div>
+<textarea id="out" placeholder="La transcription apparaît ici…"></textarea>
+<div class="row" style="margin-top:10px">
+<button id="copy">Copier</button><button id="dl">Télécharger .txt</button><button id="clr">Effacer</button>
+</div>
+<script type="module">
+import { pipeline } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1";
+const $ = id => document.getElementById(id);
+const st = t => $("st").textContent = t;
+const SR = 16000;
+let asr, cur, busy = false;
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
+async function load() {
+  const m = $("model").value;
+  if (asr && cur === m) return asr;
+  st("Chargement du modèle…");
+  asr = await pipeline("automatic-speech-recognition", m, {
+    dtype: { encoder_model: "q8", decoder_model_merged: "q8" },
+    device: "wasm",
+    progress_callback: p => { if (p.status === "progress") st(`Téléchargement ${p.file.split("/").pop()} : ${Math.round(p.progress)} %`); }
+  });
+  cur = m;
+  return asr;
+}
+async function tr(audio) {
+  const r = await asr(audio, { language: "french", task: "transcribe" });
+  return r.text.trim();
+}
+const add = t => { if (t) { $("out").value += (($("out").value && !$("out").value.endsWith("\n")) ? " " : "") + t; $("out").scrollTop = 1e9; } };
+
+// ---- Replay ----
+$("file").onchange = async e => {
+  const f = e.target.files[0]; if (!f || busy) return;
+  busy = true;
+  try {
+    await load();
+    st("Décodage du fichier…");
+    const ctx = new AudioContext({ sampleRate: SR });
+    const dec = await ctx.decodeAudioData(await f.arrayBuffer());
+    const a = dec.getChannelData(0), step = 30 * SR, n = Math.ceil(a.length / step);
+    for (let i = 0; i < n; i++) {
+      st(`Transcription ${i + 1}/${n}…`);
+      add(await tr(a.slice(i * step, (i + 1) * step)));
+    }
+    st("Terminé ✔");
+  } catch (err) { st("Erreur : " + err.message); }
+  busy = false; e.target.value = "";
+};
+
+// ---- Live (par blocs de ~6 s) ----
+let stream, ctx, proc, buf = [], len = 0, running = false, lock;
+$("live").onclick = async () => {
+  if (running) return stop();
+  if (busy) return;
+  try {
+    await load();
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    ctx = new AudioContext({ sampleRate: SR });
+    const src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    proc.onaudioprocess = ev => {
+      buf.push(new Float32Array(ev.inputBuffer.getChannelData(0))); len += 4096;
+      if (len >= 6 * SR && !busy) flush();
+    };
+    src.connect(proc); proc.connect(ctx.destination);
+    try { lock = await navigator.wakeLock.request("screen"); } catch {}
+    running = true; $("live").textContent = "⏹ Arrêter"; $("live").classList.add("rec");
+    st("Écoute en cours… (texte toutes les ~6 s, garde l'écran allumé)");
+  } catch (err) { st("Erreur : " + err.message); }
+};
+async function flush() {
+  const a = new Float32Array(len); let o = 0;
+  for (const b of buf) { a.set(b, o); o += b.length; }
+  buf = []; len = 0; busy = true;
+  try { add(await tr(a)); } catch {}
+  busy = false;
+}
+async function stop() {
+  running = false;
+  proc?.disconnect(); stream?.getTracks().forEach(t => t.stop()); ctx?.close(); lock?.release();
+  $("live").textContent = "🎙️ Live"; $("live").classList.remove("rec");
+  st("Finalisation…");
+  while (busy) await new Promise(r => setTimeout(r, 200));
+  if (len > SR) await flush();
+  st("Terminé ✔");
+}
+
+// ---- Actions ----
+$("copy").onclick = () => navigator.clipboard.writeText($("out").value).then(() => st("Copié ✔"));
+$("clr").onclick = () => { $("out").value = ""; };
+$("dl").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([$("out").value], { type: "text/plain" }));
+  a.download = "transcription.txt"; a.click();
+};
+</script>
+</body>
+</html>
