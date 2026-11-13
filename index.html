@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Transcript</title>
+<title>Otis</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png"><link rel="apple-touch-icon" href="icon-192.png">
 <meta name="theme-color" content="#0e5a86">
@@ -23,15 +23,13 @@ select{width:100%}
 </style>
 </head>
 <body>
-<h1>Transcript</h1>
+<h1>Otis</h1>
 <div class="row"><select id="model">
-<option value="onnx-community/whisper-tiny">Tiny – rapide, moins précis (~40 Mo)</option>
-<option value="onnx-community/whisper-base" selected>Base – équilibré (~80 Mo)</option>
-<option value="onnx-community/whisper-small">Small – précis, lent (~250 Mo)</option>
+<option value="onnx-community/whisper-small" selected>Small – précis, lent (~250 Mo)</option>
+<option value="onnx-community/whisper-large-v3-turbo">Large turbo – très précis, WebGPU, expérimental (~1,5 Go, Wi-Fi)</option>
 </select></div>
 <div class="row">
-<button id="live" class="main">🎙️ Live</button>
-<label class="btn">📁 Replay<input id="file" type="file" accept="audio/*,video/*" hidden></label>
+<label class="btn">📁 Choisir un fichier audio<input id="file" type="file" accept="audio/*,video/*" hidden></label>
 </div>
 <div id="st">Prêt. Le modèle se télécharge au premier usage (réseau requis une seule fois).</div>
 <textarea id="out" placeholder="La transcription apparaît ici…"></textarea>
@@ -50,9 +48,11 @@ async function load() {
   const m = $("model").value;
   if (asr && cur === m) return asr;
   st("Chargement du modèle…");
+  const big = m.includes("large");
+  if (big && !navigator.gpu) throw new Error("WebGPU indisponible sur ce navigateur : choisis Small.");
   asr = await pipeline("automatic-speech-recognition", m, {
-    dtype: { encoder_model: "q8", decoder_model_merged: "q8" },
-    device: "wasm",
+    dtype: big ? { encoder_model: "fp16", decoder_model_merged: "q4" } : { encoder_model: "q8", decoder_model_merged: "q8" },
+    device: big ? "webgpu" : "wasm",
     progress_callback: p => { if (p.status === "progress") st(`Téléchargement ${p.file.split("/").pop()} : ${Math.round(p.progress)} %`); }
   });
   cur = m;
@@ -64,7 +64,7 @@ async function tr(audio) {
 }
 const add = t => { if (t) { $("out").value += (($("out").value && !$("out").value.endsWith("\n")) ? " " : "") + t; $("out").scrollTop = 1e9; } };
 
-// ---- Replay ----
+// ---- Transcription de fichier ----
 $("file").onchange = async e => {
   const f = e.target.files[0]; if (!f || busy) return;
   busy = true;
@@ -82,44 +82,6 @@ $("file").onchange = async e => {
   } catch (err) { st("Erreur : " + err.message); }
   busy = false; e.target.value = "";
 };
-
-// ---- Live (par blocs de ~6 s) ----
-let stream, ctx, proc, buf = [], len = 0, running = false, lock;
-$("live").onclick = async () => {
-  if (running) return stop();
-  if (busy) return;
-  try {
-    await load();
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-    ctx = new AudioContext({ sampleRate: SR });
-    const src = ctx.createMediaStreamSource(stream);
-    proc = ctx.createScriptProcessor(4096, 1, 1);
-    proc.onaudioprocess = ev => {
-      buf.push(new Float32Array(ev.inputBuffer.getChannelData(0))); len += 4096;
-      if (len >= 6 * SR && !busy) flush();
-    };
-    src.connect(proc); proc.connect(ctx.destination);
-    try { lock = await navigator.wakeLock.request("screen"); } catch {}
-    running = true; $("live").textContent = "⏹ Arrêter"; $("live").classList.add("rec");
-    st("Écoute en cours… (texte toutes les ~6 s, garde l'écran allumé)");
-  } catch (err) { st("Erreur : " + err.message); }
-};
-async function flush() {
-  const a = new Float32Array(len); let o = 0;
-  for (const b of buf) { a.set(b, o); o += b.length; }
-  buf = []; len = 0; busy = true;
-  try { add(await tr(a)); } catch {}
-  busy = false;
-}
-async function stop() {
-  running = false;
-  proc?.disconnect(); stream?.getTracks().forEach(t => t.stop()); ctx?.close(); lock?.release();
-  $("live").textContent = "🎙️ Live"; $("live").classList.remove("rec");
-  st("Finalisation…");
-  while (busy) await new Promise(r => setTimeout(r, 200));
-  if (len > SR) await flush();
-  st("Terminé ✔");
-}
 
 // ---- Actions ----
 $("copy").onclick = () => navigator.clipboard.writeText($("out").value).then(() => st("Copié ✔"));
