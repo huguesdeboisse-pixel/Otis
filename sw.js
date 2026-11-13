@@ -1,9 +1,9 @@
-const C = "transcript-v2";
+const C = "transcript-v5";
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(C).then(c => c.addAll(["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png"])));
   self.skipWaiting();
 });
-self.addEventListener("activate", e => e.waitUntil(clients.claim()));
+self.addEventListener("activate", e => e.waitUntil(caches.keys().then(k => Promise.all(k.filter(n => n.startsWith("transcript-") && n !== C).map(n => caches.delete(n)))).then(() => clients.claim())));
 self.addEventListener("fetch", e => {
   const u = new URL(e.request.url);
   if (e.request.method !== "GET" || !(u.origin === location.origin || u.host === "cdn.jsdelivr.net")) return;
